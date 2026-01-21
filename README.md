@@ -1,9 +1,9 @@
 # Enumerate-Reaction-Mapping
 
 This script generates unique atom-mapped reaction SMILES by enumerating atom mappings
-and filtering them with add/break bond counts. Only edge additions and deletions are
-allowed; atom identities and bond order changes are treated as add/break based on the
-bond order delta.
+and keeping only mappings with the minimum total add+break operations. Only edge
+additions and deletions are allowed; atom identities and bond order changes are
+treated as add/break based on the bond order delta.
 
 Notes
 - Input is parsed with RDKit, then kekulized and explicit hydrogens are added.
@@ -20,11 +20,6 @@ Notes
 Basic:
 ```bash
 python reaction_mapping.py "O=CCCOO>>CC=O.O=CO"
-```
-
-With add/break ranges:
-```bash
-python reaction_mapping.py "O=CCCOO>>CC=O.O=CO" --add-range 0,3 --del-range 0,3
 ```
 
 Debug:
@@ -49,8 +44,7 @@ Expected output:
 [debug] symbol_counts: {'O': 3, 'C': 3, 'H': 6}
 [debug] group_sizes: {'O': 3, 'C': 3, 'H': 6}
 [debug] estimated_mappings: 25920
-[debug] add_range: (0.0, 3.0) del_range: (0.0, 3.0)
-[debug] done nodes=354 kept=2 drawn=0 elapsed=0.0s
+[debug] done nodes=354 kept=2 drawn=0 best_total=4 best_ops=b2f2 elapsed=0.0s
 [O:1]=[C:2]([C:3]([C:4]([O:5][O:6][H:12])([H:10])[H:11])([H:8])[H:9])[H:7]>>[C:3]([C:4](=[O:5])[H:11])([H:8])([H:9])[H:10].[O:1]=[C:2]([O:6][H:12])[H:7]
 [O:1]=[C:2]([C:3]([C:4]([O:5][O:6][H:12])([H:10])[H:11])([H:8])[H:9])[H:7]>>[C:4](=[O:5])([O:6][H:12])[H:11].[O:1]=[C:2]([C:3]([H:8])([H:9])[H:10])[H:7]
 ```

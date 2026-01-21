@@ -9,6 +9,8 @@ import networkx as nx
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
 
+EPS = 1e-6
+
 
 def parse_reaction_smiles(rxn_smiles):
     if ">>" in rxn_smiles:
@@ -119,6 +121,21 @@ def add_break_bounds_from_delta(min_delta, max_delta):
     return min_add, max_add, min_break, max_break
 
 
+def format_count(value):
+    if abs(value - round(value)) < EPS:
+        return str(int(round(value)))
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def format_best_pairs(pairs):
+    if not pairs:
+        return "none"
+    parts = []
+    for break_count, add_count in sorted(pairs):
+        parts.append(f"b{format_count(break_count)}f{format_count(add_count)}")
+    return ",".join(parts)
+
+
 def minmax_product_orders(candidates_a, candidates_b, product_orders, allow_same):
     min_p = None
     max_p = None
@@ -135,7 +152,7 @@ def minmax_product_orders(candidates_a, candidates_b, product_orders, allow_same
     return min_p, max_p
 
 
-def compute_remaining_bounds(
+def compute_remaining_min_total(
     order,
     pos,
     mapping,
@@ -147,7 +164,7 @@ def compute_remaining_bounds(
 ):
     unassigned = order[pos:]
     if not unassigned:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0
 
     remaining_by_symbol = {}
     for symbol, indices in product_indices_by_symbol.items():
@@ -159,7 +176,7 @@ def compute_remaining_bounds(
             return None
 
     symbol_pair_minmax = {}
-    min_add = max_add = min_break = max_break = 0.0
+    min_total = 0.0
     assigned = order[:pos]
     minmax_assigned = {}
 
@@ -180,10 +197,7 @@ def compute_remaining_bounds(
             min_delta = min_p - reactant_orders[i][j]
             max_delta = max_p - reactant_orders[i][j]
             a0, a1, b0, b1 = add_break_bounds_from_delta(min_delta, max_delta)
-            min_add += a0
-            max_add += a1
-            min_break += b0
-            max_break += b1
+            min_total += a0 + b0
 
     for idx_a, i in enumerate(unassigned):
         sym_i = reactant_symbols[i]
@@ -206,12 +220,9 @@ def compute_remaining_bounds(
             min_delta = min_p - reactant_orders[i][j]
             max_delta = max_p - reactant_orders[i][j]
             a0, a1, b0, b1 = add_break_bounds_from_delta(min_delta, max_delta)
-            min_add += a0
-            max_add += a1
-            min_break += b0
-            max_break += b1
+            min_total += a0 + b0
 
-    return min_add, max_add, min_break, max_break
+    return min_total
 
 
 def build_mapped_reaction_smiles(reactant_mol, product_mol, atom_mapping):
@@ -265,8 +276,6 @@ def save_reaction_svg(reactant_mol, product_mol, atom_mapping, output_path):
 
 def generate_atom_mapped_reactions(
     rxn_smiles,
-    add_range=(0, 3),
-    del_range=(0, 3),
     debug=False,
     debug_interval=100000,
     draw_path=None,
@@ -308,7 +317,6 @@ def generate_atom_mapped_reactions(
         print(f"[debug] symbol_counts: {dict(counts)}", file=sys.stderr)
         print(f"[debug] group_sizes: {group_sizes}", file=sys.stderr)
         print(f"[debug] estimated_mappings: {est}", file=sys.stderr)
-        print(f"[debug] add_range: {add_range} del_range: {del_range}", file=sys.stderr)
 
     order = sorted(
         range(reactant_mol.GetNumAtoms()),
@@ -326,10 +334,12 @@ def generate_atom_mapped_reactions(
     nodes = 0
     kept = 0
     drawn = 0
+    best_total = None
+    best_pairs = set()
     start_time = time.time()
 
     def backtrack(pos, add_count, break_count):
-        nonlocal nodes, kept, drawn
+        nonlocal nodes, kept, drawn, best_total, best_pairs
         nodes += 1
         if debug and nodes % debug_interval == 0:
             elapsed = time.time() - start_time
@@ -338,10 +348,11 @@ def generate_atom_mapped_reactions(
                 file=sys.stderr,
             )
 
-        if add_count > add_range[1] or break_count > del_range[1]:
+        current_total = add_count + break_count
+        if best_total is not None and current_total > best_total + EPS:
             return
 
-        bounds = compute_remaining_bounds(
+        min_remaining = compute_remaining_min_total(
             order,
             pos,
             mapping,
@@ -351,19 +362,23 @@ def generate_atom_mapped_reactions(
             reactant_symbols,
             product_indices_by_symbol,
         )
-        if bounds is None:
+        if min_remaining is None:
             return
-        min_add, max_add, min_break, max_break = bounds
-        if add_count + min_add > add_range[1]:
-            return
-        if add_count + max_add < add_range[0]:
-            return
-        if break_count + min_break > del_range[1]:
-            return
-        if break_count + max_break < del_range[0]:
+        if best_total is not None and current_total + min_remaining > best_total + EPS:
             return
 
         if pos == len(order):
+            total = current_total
+            if best_total is None or total < best_total - EPS:
+                best_total = total
+                best_pairs = {(break_count, add_count)}
+                results.clear()
+                seen_keys.clear()
+            elif abs(total - best_total) <= EPS:
+                best_pairs.add((break_count, add_count))
+            else:
+                return
+
             key = mapping_key(mapping, reactant_ranks, product_ranks)
             if key in seen_keys:
                 return
@@ -403,44 +418,24 @@ def generate_atom_mapped_reactions(
     backtrack(0, 0.0, 0.0)
     if debug:
         elapsed = time.time() - start_time
+        best_total_str = "none" if best_total is None else format_count(best_total)
+        best_pairs_str = format_best_pairs(best_pairs)
         print(
-            f"[debug] done nodes={nodes} kept={kept} drawn={drawn} elapsed={elapsed:.1f}s",
+            f"[debug] done nodes={nodes} kept={kept} drawn={drawn} "
+            f"best_total={best_total_str} best_ops={best_pairs_str} "
+            f"elapsed={elapsed:.1f}s",
             file=sys.stderr,
         )
     return sorted(results)
 
 
-def parse_range(value, name):
-    parts = value.split(",")
-    if len(parts) != 2:
-        raise ValueError(f"{name} should be 'min,max'.")
-    try:
-        low = float(parts[0])
-        high = float(parts[1])
-    except ValueError as exc:
-        raise ValueError(f"{name} should be numbers.") from exc
-    if low > high:
-        raise ValueError(f"{name} min should be <= max.")
-    return low, high
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Generate unique atom-mapped reaction SMILES by filtering add/break counts."
+            "Generate unique atom-mapped reaction SMILES with minimal add+break count."
         )
     )
     parser.add_argument("smiles", help="Reaction SMILES, e.g. O=CCCOO>>CC=O.O=CO")
-    parser.add_argument(
-        "--add-range",
-        default="0,3",
-        help="Allowed add count range by bond order delta (min,max), default 0,3",
-    )
-    parser.add_argument(
-        "--del-range",
-        default="0,3",
-        help="Allowed break count range by bond order delta (min,max), default 0,3",
-    )
     parser.add_argument(
         "--debug",
         action="store_true",
@@ -470,13 +465,8 @@ def main():
     )
     args = parser.parse_args()
 
-    add_range = parse_range(args.add_range, "add-range")
-    del_range = parse_range(args.del_range, "del-range")
-
     results = generate_atom_mapped_reactions(
         args.smiles,
-        add_range=add_range,
-        del_range=del_range,
         debug=args.debug,
         debug_interval=args.debug_interval,
         draw_path=args.draw_path if args.draw else None,
